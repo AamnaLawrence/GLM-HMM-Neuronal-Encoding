@@ -1,0 +1,82 @@
+function [logp, gamma, xisum] = runFB_GLMHMM_multi_stable(Ahat, WhatAll, xdatAll, ydatAll)
+% Numerically stable forward-backward for shared-state Poisson GLM-HMM
+% 
+% Inputs:
+%   Ahat [state x state]- Transition matrix
+%   WhatAll [1 x neurons] - cell array such that each cell is weight matrix [predictors x states] 
+%   xdatAll [1 x neurons] - cell array such that each cell is predictor matrix [predictors x T]
+%   ydatAll [1 x neurons] - cell array such that each cell is a spike train [1 x T] 
+%
+% Outputs:
+%   logp [1 x 1]-  total log-likelihood
+%   gamma [state x T] - posterior probabilities p(z_t | data)
+%   xisum [state x state] - expected transitions sum_t P(z_t-1, z_t | data)
+
+nNeurons = numel(WhatAll);
+nStates  = size(Ahat,1);
+nT       = size(xdatAll{1},2);
+
+%% 1. Compute log-likelihood per state per time bin
+logpy_total = zeros(nT, nStates);
+for iNeuron = 1:nNeurons
+    What = WhatAll{iNeuron};  
+    xdat = xdatAll{iNeuron};  
+    ydat = ydatAll{iNeuron};  
+    
+    eta = What' * xdat;        
+    eta = min(max(eta, -20), 20); % clamp
+    lambda = exp(eta);
+    lambda = max(lambda, 1e-12);  % avoid log(0)
+
+    logpy = ydat .* log(lambda) - lambda; 
+    logpy_total = logpy_total + logpy';   % sum across neurons
+end
+
+%% 2. Forward pass with scaling
+logalpha = zeros(nStates, nT);
+logcs = zeros(1,nT);  % scaling factors
+
+logpi0 = log(ones(1,nStates)/nStates); % log initial probs
+logalpha(:,1) = logpi0' + logpy_total(1,:)';
+logcs(1) = logsumexp(logalpha(:,1),1);
+logalpha(:,1) = logalpha(:,1) - logcs(1);
+
+for t = 2:nT
+    % logsumexp over previous states
+    tmp = logalpha(:,t-1) + log(Ahat)';  
+    logalpha(:,t) = logsumexp(tmp,1)' + logpy_total(t,:)';
+    logcs(t) = logsumexp(logalpha(:,t),1);
+    logalpha(:,t) = logalpha(:,t) - logcs(t); % scale
+end
+
+%% 3. Backward pass with scaling
+logbeta = zeros(nStates,nT);
+logbeta(:,nT) = 0;  % log(1)
+
+for t = nT-1:-1:1
+    tmp = log(Ahat) + logpy_total(t+1,:)' + logbeta(:,t+1)';
+    logbeta(:,t) = logsumexp(tmp,2);
+    logbeta(:,t) = logbeta(:,t) - logcs(t+1); % subtract forward scale
+end
+
+%% 4. Compute gamma
+loggamma = logalpha + logbeta;
+loggamma = loggamma - logsumexp(loggamma,1); % normalize per time bin
+gamma = exp(loggamma); % posterior probabilities
+
+%% 5. Compute xisum (expected transitions)
+if nargout > 2
+    xisum = zeros(nStates,nStates);
+    for t = 1:nT-1
+        logxi = logalpha(:,t) + log(Ahat) + logpy_total(t+1,:)' + logbeta(:,t+1)';
+        logxi = logxi - logsumexp(logxi(:),1);  % normalize
+        xisum = xisum + exp(logxi);
+    end
+end
+
+%% 6. Total log-likelihood
+logp = sum(logcs);
+
+end
+
+

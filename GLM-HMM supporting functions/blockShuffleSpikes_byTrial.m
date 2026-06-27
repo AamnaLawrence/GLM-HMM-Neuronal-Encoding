@@ -1,0 +1,43 @@
+function Yshuf = blockShuffleSpikes_byTrial(Y, trialno, block_len)
+% Shuffling the spike train for a specific trial
+% Inputs
+% ------
+% Y [T x neurons] - Binned spike trains
+% trialno [T x 1] - Binned trial number vector
+% block_len [1 x 1]- Number of bins to shuffle
+
+% Output
+% ------
+% Yshuf [T x neurons] - Shuffled spikes for the trial numbers
+
+Yshuf = Y;
+trials = unique(trialno);
+
+for tr = trials'
+    
+    idx = find(trialno == tr);
+    Ytrial = Y(idx,:);
+    
+    T = size(Ytrial,1);
+    nBlocks = floor(T/block_len);
+    Tuse = nBlocks*block_len;
+    
+    if Tuse == 0
+        continue
+    end
+    
+    Ytrim = Ytrial(1:Tuse,:);
+    Yblocks = reshape(Ytrim, block_len, nBlocks, []);
+    
+    perm = randperm(nBlocks);
+    Yblocks = Yblocks(:,perm,:);
+    
+    Yshuf_trial = reshape(Yblocks, Tuse, []);
+    
+    if Tuse < T
+        Yshuf_trial = [Yshuf_trial; Ytrial(Tuse+1:end,:)];
+    end
+    
+    Yshuf(idx,:) = Yshuf_trial;
+end
+end
