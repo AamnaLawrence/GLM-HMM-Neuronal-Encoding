@@ -3,6 +3,8 @@
 This repository contains the code and processed data required to reproduce the analyses and figures presented in the manuscript (under review by PLOS Computation Biology):
 
 > **Uncovering internal states with a robust shared-state multi-neuron GLM-HMM framework**
+
+> Archived version of this repository: [![DOI](https://zenodo.org/badge/1282323989.svg)](https://doi.org/10.5281/zenodo.20970582)
 ---
 
 ## Overview
