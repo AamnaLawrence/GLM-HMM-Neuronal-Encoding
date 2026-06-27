@@ -24,6 +24,7 @@ http://dx.doi.org/10.6080/K0FT8J72
 
 Insula dataset: insula.mat
 
+Inside the dataset, RAW.Einfo provides the event information and RAW.Erast contains the event rasters. RAW.Nrast contains neuronal rasters.
 This dataset was collected in our laboratory (Dr. Patricia Janak) and is provided in processed form to reproduce the analyses presented in the manuscript.
 
 ---
