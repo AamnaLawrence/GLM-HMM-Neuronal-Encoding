@@ -1,0 +1,770 @@
+% Main script for fitting GLM-MM to mPFC dataset
+
+clc;
+clear all;
+
+behav=readmatrix("150628_Behavior.dat");
+cells=readmatrix("150628_CellType.dat");
+pos=readmatrix("150628_Pos.dat");
+spikes=readmatrix("150628_SpikeData.dat");
+num_cells=size(cells,1);
+
+%% distance between trial start and end
+trial=[];
+trial_start_end_diff=[];
+for i=1:size(behav,1)-1
+    trial=[trial,behav(i+1,1)-behav(i,2)];
+    trial_start_end_diff=[trial_start_end_diff,behav(i,2)-behav(i,1)];
+
+end
+min_dist=min(trial)/1000
+figure
+hist(trial_start_end_diff,10)
+xlim([0,inf])
+
+
+%% Extract neurons
+for i=1:num_cells
+    temp=find(spikes(:,2)==i);
+    RAW.Nrast{i,1}=spikes(temp,1)/1000; %in seconds
+    clear temp;
+end
+
+%% Binning neuronal data
+N=[];
+bin_size=0.05;
+FR=zeros(1,num_cells);
+for neuron_id=1:num_cells
+    temp_binned_spikes=[];
+    for i=1:size(behav,1)-1
+
+        Tanalysis=behav(i,1)/1000 :bin_size: behav(i,2)/1000+(behav(i+1,1)-behav(i,2))/1000;
+        temp_binned_spikes=[temp_binned_spikes,histcounts(RAW.Nrast{neuron_id,1}(find(RAW.Nrast{neuron_id,1}>=Tanalysis(1) & RAW.Nrast{neuron_id,1}<=Tanalysis(end))),[Tanalysis Tanalysis(end)+(Tanalysis(end)-Tanalysis(end-1))])]; %spike counts
+      
+     end
+    N.binned_spikes(:,neuron_id)=temp_binned_spikes';
+    RAW.FR(neuron_id)=sum(N.binned_spikes(:,neuron_id))/(size(N.binned_spikes,1)*bin_size);
+    RAW.neuron_sum(neuron_id)=sum(N.binned_spikes(:,neuron_id));
+end
+
+%% Binning decisions
+
+N.binned_trialstart=[];
+N.binned_trialend=[];
+N.binned_outcome=[];
+N.binned_trialno=[];
+trial_start=behav(:,1)/1000;
+trial_end=behav(:,2)/1000;
+for i=1:size(behav,1)-1
+    temp_binned_trialstart=[];
+    Tanalysis=behav(i,1)/1000 :bin_size: behav(i,2)/1000+(behav(i+1,1)-behav(i,2))/1000;
+    temp_binned_trialstart=histcounts(trial_start(find(trial_start>=Tanalysis(1) & trial_start<=Tanalysis(end))),[Tanalysis Tanalysis(end)+(Tanalysis(end)-Tanalysis(end-1))]);
+    temp_binned_trialend=histcounts(trial_end(find(trial_end>=Tanalysis(1) & trial_end<=Tanalysis(end))),[Tanalysis Tanalysis(end)+(Tanalysis(end)-Tanalysis(end-1))]);
+    N.binned_trialstart=[N.binned_trialstart;temp_binned_trialstart'];
+    N.binned_trialend=[N.binned_trialend;temp_binned_trialend'];
+    N.binned_trialno=[N.binned_trialno;i*ones(1,length(Tanalysis))'];
+    if behav(i,4)==1 %correct
+        N.binned_outcome=[N.binned_outcome;ones(1,length(Tanalysis))'];
+    elseif behav(i,4)==0 %incorrect
+        N.binned_outcome=[N.binned_outcome;-1*ones(1,length(Tanalysis))'];
+    end
+   
+end
+
+%% Basis for all trials
+close all;
+X=struct();
+rcSelect = 2:6;
+numRC = numel(rcSelect);
+%bases = makeNonlinearRaisedCos(20, bin_size*1000, [0 1500], 5); % Pillow lab for 2.7s with 100ms 
+if bin_size==0.05
+    bases = makeNonlinearRaisedCos(20, bin_size*1000, [0 1500], 10); %for 50ms with 2.7s time support
+elseif bin_size==0.02
+    bases = makeNonlinearRaisedCos(20, bin_size*1000, [0 1000], 20); %for 20ms with 2.7s time support
+end
+figure;
+plot(bases.tr * (bin_size), bases.B(:,rcSelect)); % convert bins back to seconds
+xlabel('Time (s)');
+ylabel('Basis amplitude');
+title('Log raised cosine bases');
+%% Preparing the feature matrix
+% After convolution, z-score each regressor column-wise
+
+X=struct();
+X.trialstart = zscore(temporalBases_sparse(N.binned_trialstart,bases.B(:,rcSelect)));
+X.start_outcome = zscore(temporalBases_sparse(N.binned_outcome.*N.binned_trialstart, bases.B(:, rcSelect)));
+X.pre_trialend=zscore(flipud(temporalBases_sparse(flipud(N.binned_trialend), bases.B(:, rcSelect))));
+X.pre_end_outcome=zscore(flipud(temporalBases_sparse(flipud(N.binned_trialend.*N.binned_outcome), bases.B(:, rcSelect))));
+X.trialend= zscore(temporalBases_sparse(N.binned_trialend,bases.B(:,rcSelect)));
+X.end_outcome = zscore(temporalBases_sparse(N.binned_outcome.*N.binned_trialend, bases.B(:, rcSelect)));
+
+for neuron_id=1:length(RAW.Nrast)
+    y=N.binned_spikes(:, neuron_id);
+    
+    X.SpkHist{neuron_id}=zscore(temporalBases_sparse([0; y(1:end-1)], bases.B(:,rcSelect)));
+end
+
+%% Fit a sharded-state GLM-HMM
+
+ablation_type=0; %0 for glm with ridge, 1 for pure glm, 2 for random penalization
+numStates=4;  % hard code
+results = struct();
+numNeurons = length(RAW.Nrast);
+A0 = 1*eye(numStates)+.2*rand(numStates); %from Pillow lab
+A0 = A0 ./ sum(A0,2);  % each row sums to 1
+X_all_neuron = cell(1,numNeurons);
+y_neuron = cell(1,numNeurons);
+W0_neuron = cell(1,numNeurons);
+optimal_lambda=nan(1,numNeurons);
+for neuron_id=1:length(RAW.Nrast)
+    y = N.binned_spikes(:,neuron_id);
+    mean_y=mean(y);
+    var_y=var(y);
+    
+    if RAW.FR(neuron_id)<0.2 
+         disp(['Skipping low FR (<0.2Hz) neuron# ' num2str(neuron_id)]);
+         continue;
+    end
+  
+    % === 1. Prepare the feature matrix by combining all predictors ===
+    X_all = [ ones(length(X.SpkHist{1,neuron_id}),1),  X.trialstart, X.start_outcome, X.pre_trialend, X.pre_end_outcome, X.trialend, X.end_outcome, X.SpkHist{1,neuron_id}];
+
+    X_all_neuron{neuron_id}=X_all';
+
+    % === 2. Initialize HMM params ===
+    if ablation_type==0 %using glmnet with lambda
+        opts = struct('alpha', 0, 'nfolds', 5,'nlambda',50,'standardize',false);
+        cv_fit = cvglmnet(X_all(:,2:end), y, 'poisson', opts);
+        optimal_lambda(neuron_id) = cv_fit.lambda_min;
+        Wglm_ml = glmnetCoef(cv_fit.glmnet_fit, optimal_lambda(neuron_id));
+        W0 = Wglm_ml + randn(size(X_all,2),numStates)*norm(Wglm_ml)*.25; %smart initialization
+
+    elseif ablation_type==1 %using glmfit with no lambda
+        [Wglm_ml, ~, ~] = glmfit(X_all(:,2:end), y, 'poisson', 'constant', 'on');
+        optimal_lambda(neuron_id) = 0;
+        W0 = Wglm_ml + randn(size(X_all,2),numStates)*norm(Wglm_ml)*.25; 
+
+    elseif ablation_type==2 %not using any glm
+
+        W0 = randn(size(X_all,2), numStates) * 0.01;
+        W0(1,:) = log(mean(y) + 1e-6);
+        optimal_lambda(neuron_id)=0;
+    end
+        
+    W0_neuron{neuron_id}=W0;
+    y_neuron{neuron_id}=y';
+end
+
+X_all_neuron = X_all_neuron(~cellfun(@isempty,X_all_neuron));
+y_neuron = y_neuron(~cellfun(@isempty,y_neuron));
+W0_neuron = W0_neuron(~cellfun(@isempty,W0_neuron));
+optimal_lambda = optimal_lambda(~isnan(optimal_lambda));
+
+
+%[Ahat, What, logp,logpTrace,sqErr,jj,dlogp,gams,all_weights_iter]=runEMforGLMHMM_multi_NR(A0,W0_neuron,X_all_neuron,y_neuron, optimal_lambda); %pure NR
+[Ahat, What, logp,logpTrace,sqErr,jj,dlogp,gams,all_weights_iter]=runEMforGLMHMM_multi(A0,W0_neuron,X_all_neuron,y_neuron, optimal_lambda);
+
+finalLogLikelihood=logpTrace(end);
+logLs = finalLogLikelihood;
+
+% --- Compute # of params ---
+nCov = size(X_all,2);
+p = numStates*(numStates-1) + numStates*nCov*length(y_neuron);  % transition + GLM weights
+
+% --- Compute AIC/BIC ---
+T = size(X_all,1);  % number of bins
+AICs = -2*finalLogLikelihood + 2*p;
+BICs = -2*finalLogLikelihood + p*log(T);
+
+results.K = numStates;
+results.Ahat = Ahat;
+results.What = What;
+results.gams = gams;
+results.logpTrace = logpTrace;
+results.finalLogL = logpTrace(end);
+results.AIC = AICs;
+results.BIC = BICs;
+results.sqErr = sqErr;
+results.nParams = p;
+results.A0=A0;
+results.optimal_lambda=optimal_lambda;
+results.W0=W0_neuron;
+results.all_weights_iter=all_weights_iter;
+%% Setting the color palettes and font sizes
+set(groot, 'defaultAxesColorOrder', parulaHighContrast(numStates+1));
+colors=parulaHighContrast(numStates+1);
+colormap(parula); % still use full for heatmaps
+
+% Set font name and size
+set(groot, 'defaultAxesFontName', 'Arial');
+set(groot, 'defaultAxesFontSize', 14);          % Axis ticks, x/y labels
+set(groot, 'defaultTextFontName', 'Arial');
+set(groot, 'defaultTextFontSize', 15);          % Titles
+set(groot, 'defaultLegendFontSize', 14);
+set(groot, 'defaultLegendFontName', 'Arial');
+
+% Optional: line width and tick direction for clean style
+set(groot, 'defaultAxesLineWidth', 1.2);
+set(groot, 'defaultLineLineWidth', 1.5);
+set(groot, 'defaultAxesTickDir', 'out');
+set(groot, 'defaultAxesXGrid', 'off', ...
+           'defaultAxesYGrid', 'off', ...
+           'defaultAxesZGrid', 'off');
+
+%% checking model fit
+close all;
+fig = figure;
+logpTrace=results.logpTrace(2:end);
+plot(1:numel(logpTrace), -logpTrace, 'o-','LineWidth',2);
+xlabel('Iteration');
+ylabel('Negative log-likelihood');
+% grid on;
+box off
+
+fig=figure;
+sqErr=results.sqErr(2:end);
+plot(1:numel(sqErr), sqErr, 'o-','LineWidth',2);
+xlabel('Iteration');
+ylabel('Squared parameter change');
+% grid on;
+box off
+ylim([0 Inf])
+
+%% Correlation between states
+numStates = results.K;
+numNeurons = numel(results.What);
+numPredictors = size(results.What{1,1},1);
+
+% Stack all neuron weights into one array
+corrMatAll = nan(numStates,numStates,numNeurons);
+
+for n = 1:numNeurons
+    corrMatAll(:,:,n) = corr(results.What{1,n});  % correlation across states
+end
+
+% Mean or median correlation across neurons
+corrMat_mean = mean(corrMatAll,3);
+
+fig=figure;
+imagesc(corrMat_mean);
+colormap(parula);
+colorbar;
+xticks(1:results.K)
+xticklabels(['State 1';'State 2';'State 3']);%;'State 4';'State 5'])
+yticks(1:results.K)
+yticklabels(['State 1';'State 2';'State 3']);%;'State 4';'State 5'])
+axis square;
+title('Mean Correlation of GLM Weights (per neuron)');
+%% Plotting gams
+% find max probability states
+%use results_4states.mat
+[~, state_seq] = max(results.gams, [], 1);   % 1 x T
+correct_start_times=find(N.binned_outcome.*N.binned_trialstart==1);
+correct_end_times=find(N.binned_outcome.*N.binned_trialend==1);
+incorrect_start_times=find(N.binned_outcome.*N.binned_trialstart==-1);
+incorrect_end_times=find(N.binned_outcome.*N.binned_trialend==-1);
+figure
+
+subplot(121)
+heatplot_correct=[];
+for i=1:length(correct_start_times)
+    heatplot_correct(i,:)=state_seq(correct_start_times(i):correct_start_times(i)+200);
+   
+end
+[sortedlen, sortIdx] = sort(behav(find(behav(1:end-1,4)==1),2)-behav(find(behav(1:end-1,4)==1),1), 'ascend', 'MissingPlacement', 'last');
+state_seq_rwd = heatplot_correct(sortIdx, :);
+colormap(parula)
+imagesc(heatplot_correct)
+colormap(lines(numStates));
+
+% xticks(-3.5:1:4); 
+heatplot_incorrect=[];
+for i=1:length(incorrect_start_times)
+    heatplot_incorrect(i,:)=state_seq(incorrect_start_times(i):incorrect_start_times(i)+200);
+   
+end
+subplot(122)
+colormap(parula)
+imagesc(heatplot_incorrect)
+colormap(lines(numStates));
+
+%% coloring trajectory by state
+close all;
+t_start = behav(1,1) / 1000;
+t_end   = behav(end,2) / 1000;
+
+time_bins = t_start : bin_size : t_end;
+t = time_bins(1:end-1) + bin_size/2;
+
+% --- time vector for bins (MUST match your binning) ---
+t = time_bins(1:end-1) + bin_size/2;   % seconds
+
+% --- map position → state ---
+pos_time = pos(:,1) / 1000;
+
+bin_idx = discretize(pos_time, time_bins);
+
+state_per_pos = nan(size(pos_time));
+
+valid = ~isnan(bin_idx) & bin_idx <= length(state_seq);
+
+state_per_pos(valid) = state_seq(bin_idx(valid));
+
+fig=figure
+correct_trial_start = find(behav(:,4)==1);
+ax1 = subplot(1,2,1);
+hold(ax1,'on');
+title(ax1,'Correct')
+extra_start=0;
+extra_end=3000;
+for i = 1:3 % select correct trials
+
+    start_time = behav(correct_trial_start(i),1);
+    end_time   = behav(correct_trial_start(i),2);
+
+    % --- indices ---
+    trial_idx = find(pos(:,1) >= start_time & pos(:,1) <= end_time);
+    trial_idx_extended = find(pos(:,1) >= start_time-extra_start & pos(:,1) <= end_time+extra_end);
+    % --- plot trajectory colored by state ---
+    for k = 1:length(trial_idx_extended)-1
+        
+        idx1 = trial_idx_extended(k);
+        idx2 = trial_idx_extended(k+1);
+        
+        s = state_per_pos(idx1);  % state at this segment
+        
+        plot(pos([idx1 idx2],2), pos([idx1 idx2],3), ...
+            'Color', colors(s,:), 'LineWidth', 2);
+    end
+
+    % --- markers ---
+    [~, start_idx] = min(abs(pos(:,1) - start_time));
+    plot(pos(start_idx,2), pos(start_idx,3), 'go', 'MarkerFaceColor',[0.5 0.5 0.5],'MarkerEdgeColor','none');
+    plot(pos(trial_idx(end),2), pos(trial_idx(end),3), 'ro', 'MarkerFaceColor','k','MarkerEdgeColor','none');
+
+end
+
+xlim(ax1,[20,300])
+ylim(ax1,[20,250])
+xlabel(ax1,'x position')
+ylabel(ax1,'y position')
+hold(ax1,'off')
+
+incorrect_trial_start = find(behav(:,4)==0);
+ax2 = subplot(1,2,2);
+hold(ax2,'on');
+title(ax2,'Incorrect')
+
+for i = 3:5 % select incorrect trials
+
+    start_time = behav(incorrect_trial_start(i),1);
+    end_time   = behav(incorrect_trial_start(i),2);
+
+    % --- indices ---
+    trial_idx = find(pos(:,1) >= start_time & pos(:,1) <= end_time);
+    trial_idx_extended = find(pos(:,1) >= start_time-extra_start & pos(:,1) <= end_time+extra_end);
+    
+    % --- plot trajectory colored by state ---
+    for k = 1:length(trial_idx_extended)-1
+        
+        idx1 = trial_idx_extended(k);
+        idx2 = trial_idx_extended(k+1);
+        
+        s = state_per_pos(idx1);  % state at this segment
+        
+        plot(pos([idx1 idx2],2), pos([idx1 idx2],3), ...
+            'Color', colors(s,:), 'LineWidth', 2);
+    end
+
+    % --- markers ---
+    [~, start_idx] = min(abs(pos(:,1) - start_time));
+    p(1)=plot(pos(start_idx,2), pos(start_idx,3), 'go', 'MarkerFaceColor',[0.5, 0.5, 0.5],'MarkerEdgeColor','none');
+    p(2)=plot(pos(trial_idx(end),2), pos(trial_idx(end),3), 'ro', 'MarkerFaceColor','k','MarkerEdgeColor','none');
+
+end
+
+
+xlim(ax2,[20,300])
+ylim(ax2,[20,250])
+xlabel(ax2,'x position')
+ylabel(ax2,'y position')
+hold(ax2,'off')
+
+lgd=legend(p, ["Trial start","Trial end"],'Location','southwest');
+lgd.Position = [0.47, 0.9, 0.05, 0.07];  % Manual position outside
+
+colormap(colors(1:numStates,:))
+caxis([0.5 numStates + 0.5])
+cb = colorbar(ax2);
+cb.Position(1) = cb.Position(1) + 0.1; % push right
+cb.Ticks = linspace(1,numStates,numStates);
+cb.TickLabels = 1:numStates;
+cb.Label.String = 'State';
+
+
+%% computing kernels
+
+offset=1;
+var_indices = {
+    1:5;    % Trial start: 5 basis functions
+    6:10;   % Trial start outcome: 5 basis functions
+    11:15;   % Pre-trial end: 5 basis functions
+    16:20;   % Pre-trial end outcome: 5 basis functions
+    21:25;   % Trial end: 5 basis functions
+    26:30;   % Trial end outcome: 5 basis functions
+    31:35;   % Spike history: 5 basis function
+    
+};
+
+kernels=struct();
+for neuron_id=1:length(results.What)
+    
+    for g=1:length(var_indices)
+        idx_group=var_indices{g}+offset;
+        if  length(idx_group)>1
+            weights = results.What{1,neuron_id}(idx_group,:);
+            kernels(neuron_id).predictors{g} = bases.B(:,rcSelect) * weights;
+            
+        elseif length(idx_group)==1
+            kernels(neuron_id).predictors{g}=results.What{1,neuron_id}(idx_group,:);
+            
+        end
+    end
+end
+state_rwd = 3;
+state_norwd = 2;
+predictor=2;
+
+for n = 1:length(results.What)
+    kernel_rwd = kernels(n).predictors{1,predictor}(:,state_rwd);
+    kernel_norwd = kernels(n).predictors{1,predictor}(:,state_norwd);
+    
+    if ~isempty(kernel_rwd)
+        all_kernel_rwd(n,:) = kernel_rwd(:)'; % neurons x time
+    end
+    if ~isempty(kernel_norwd)
+        all_kernel_norwd(n,:) = kernel_norwd(:)'; % neurons x time
+    end
+end
+kernel_mean_rwd = nanmean(all_kernel_rwd, 1);
+kernel_sd_rwd   = nanstd(all_kernel_rwd, 0, 1);
+kernel_sem_rwd= kernel_sd_rwd ./ sqrt(sum(~isnan(all_kernel_rwd(:,1))));
+kernel_mean_norwd = nanmean(all_kernel_norwd, 1);
+kernel_sd_norwd   = nanstd(all_kernel_norwd, 0, 1);
+kernel_sem_norwd = kernel_sd_norwd ./ sqrt(sum(~isnan(all_kernel_norwd(:,1))));
+time_axis=(1:size(all_kernel_rwd,2))*bin_size;
+fig = figure; hold on;
+
+%Shaded region
+fill([time_axis fliplr(time_axis)], ...
+     [kernel_mean_rwd+kernel_sem_rwd fliplr(kernel_mean_rwd-kernel_sem_rwd)], ...
+     colors(state_rwd,:), ...
+     'FaceAlpha', 0.25, ...
+     'EdgeColor', 'none');
+fill([time_axis fliplr(time_axis)], ...
+     [kernel_mean_norwd+kernel_sem_norwd fliplr(kernel_mean_norwd-kernel_sem_norwd)], ...
+     colors(state_norwd,:), ...
+     'FaceAlpha', 0.25, ...
+     'EdgeColor', 'none');
+
+%Mean line
+p(1)=plot(time_axis, kernel_mean_rwd, ...
+     'Color', colors(state_rwd,:), ...
+     'LineWidth', 2);
+p(2)=plot(time_axis, kernel_mean_norwd, ...
+     'Color', colors(state_norwd,:), ...
+     'LineWidth', 2);
+
+xlabel('Time relative to trial start (s)');
+ylabel('Kernel');
+xlim([0 2])
+ylim([-0.8 1.2])
+legend(p,'Correct','Incorrect')
+box off;
+
+%% -------------------------------------------------Ablations--------------------------------------------------
+close all;
+results_glmnet=load('results_4states.mat');
+results_glmnet=results_glmnet.results;
+results_glmfit=load('results_4states_glmfit.mat');
+results_glmfit=results_glmfit.results;
+results_random=load('results_4states_random.mat');
+results_random=results_random.results;
+
+allW_glmnet = cellfun(@(W) W(2:end,:), results_glmnet.What, 'UniformOutput', false);
+allW_glmnet = vertcat(allW_glmnet{:});
+allW_glmnet = allW_glmnet(:);
+
+allW_glmfit = cellfun(@(W) W(2:end,:), results_glmfit.What, 'UniformOutput', false);
+allW_glmfit = vertcat(allW_glmfit{:});
+allW_glmfit = allW_glmfit(:);
+
+allW_random = cellfun(@(W) W(2:end,:), results_random.What, 'UniformOutput', false);
+allW_random = vertcat(allW_random{:});
+allW_random = allW_random(:);
+
+%% plotting weights
+close all;
+eps = 1e-8;
+
+all_logW = log10(abs([allW_glmnet; allW_glmfit; allW_random]) + eps);
+edges = linspace(min(all_logW), max(all_logW), 60);
+
+fig=figure; 
+
+subplot(131)
+histogram(log10(abs(allW_glmnet)+eps), edges, 'Normalization','pdf');
+hold on
+xline(1, 'r', 'LineWidth', 2, 'Label', '|w| = 10', ...
+      'LabelHorizontalAlignment', 'left');
+title('Penalized GLM')
+xlabel('log10(|Weight|)')
+ylabel('Probability Density')
+subplot(132)
+histogram(log10(abs(allW_glmfit)+eps), edges, 'Normalization','pdf');
+xline(1, 'r', 'LineWidth', 2, 'Label', '|w| = 10', ...
+      'LabelHorizontalAlignment', 'left');
+title('Unpenalized GLM')
+xlabel('log10(|Weight|)')
+subplot(133)
+histogram(log10(abs(allW_random)+eps), edges, 'Normalization','pdf');
+xline(1, 'r', 'LineWidth', 2, 'Label', '|w| = 10', ...
+      'LabelHorizontalAlignment', 'left');
+title('Random')
+xlabel('log10(|Weight|)')
+hold off
+%% ---------------------------------------------------- Trust region vs pure NR convergence checks---------------------------------------
+results_TR=load('results_4states_TR.mat');
+results_TR=results_TR.results;
+results_NR=load('results_4states_NR.mat');
+results_NR=results_NR.results;
+for i=1:size(results_TR.all_weights_iter,2)
+    rms_wt_TR(i)=sqrt(mean(results_TR.all_weights_iter(~isnan(results_TR.all_weights_iter(:,i)),i).^2));
+    rms_wt_NR(i)=sqrt(mean(results_NR.all_weights_iter(~isnan(results_NR.all_weights_iter(:,i)),i).^2));
+    nan_frac_NR(i)=mean(isnan(results_NR.all_weights_iter(:,i)));
+    nan_frac_TR(i)=mean(isnan(results_TR.all_weights_iter(:,i)));
+end
+close all;
+fig=figure
+yyaxis left
+logpTrace_TR=results_TR.logpTrace(2:end);
+plot(2:numel(results_TR.logpTrace), -logpTrace_TR, 'o-','LineWidth',2, 'Color',colors(1,:));
+set(gca, 'YColor', colors(1,:)); % Set left axis color
+ylabel(sprintf("Negative log-likelihood \n Trust-region"),'Color',colors(1,:))
+hold on
+yyaxis right
+logpTrace_NR=results_NR.logpTrace(2:end);
+plot(2:numel(results_NR.logpTrace), -logpTrace_NR, 'o-','LineWidth',2,'Color',colors(2,:));
+ylabel(sprintf("Negative log-likelihood \n Newton-Raphson"),'Color',colors(2,:))
+set(gca, 'YColor', colors(2,:)); % Set right axis color
+hold off
+xlabel('Iterations')
+
+fig=figure
+yyaxis left
+plot(nan_frac_TR,'-o','Color',colors(1,:))
+set(gca, 'YColor', colors(1,:)); % Set left axis color
+ylabel(sprintf("NaN fraction of GLM weights \n Trust-region"),'Color',colors(1,:))
+hold on
+yyaxis right
+plot(nan_frac_NR,'-o','Color',colors(2,:))
+set(gca, 'YColor', colors(2,:)); % Set right axis color
+ylabel(sprintf("NaN fraction of GLM weights \n Newton-Raphson"),'Color',colors(2,:))
+hold off
+xlabel('Iterations')
+
+%% ----------------------------------------------------Held out trial analysis-----------------------------------------------------------
+% using pre-computed intial weights, initialization matrix and optimal lambda for all bins
+results=load('results_4states.mat');
+results=results.results;
+numStates=results.K;
+numNeurons=length(results.optimal_lambda);
+W0_neuron=results.W0;
+optimal_lambda=results.optimal_lambda;
+A0=results.A0;
+total_trials=size(behav,1)-1;
+for heldOutTrial=1:total_trials
+    
+
+    N.binned_trialstart_train=[];
+    N.binned_trialend_train=[];
+    N.binned_trialno_train=[];
+    N.binned_outcome_train=[];
+    N.binned_trialstart_test=[];
+    N.binned_trialend_test=[];
+    N.binned_outcome_test=[];
+    
+
+    trainIdx=setdiff(1:total_trials,heldOutTrial);
+    testIdx = heldOutTrial;
+
+    %preparing the train set
+    trialselector=ismember(N.binned_trialno, trainIdx);
+    N.binned_spikes_train = N.binned_spikes(trialselector,:);
+    N.binned_trialno_train=N.binned_trialno(trialselector);
+%     block_len = 1;   % e.g., 2 s blocks for 50 ms bins
+%     N.binned_spikes_train = blockShuffleSpikes_byTrial(N.binned_spikes_train, N.binned_trialno_train,block_len);
+
+    N.binned_trialstart_train=N.binned_trialstart(trialselector);
+    N.binned_trialend_train=N.binned_trialend(trialselector);
+    N.binned_outcome_train=N.binned_outcome(trialselector);
+
+    %preparing the test set
+
+    trialselector=ismember(N.binned_trialno, testIdx);
+    N.binned_spikes_test=N.binned_spikes(trialselector,:);
+    N.binned_trialstart_test=N.binned_trialstart(trialselector);
+    N.binned_trialend_test=N.binned_trialend(trialselector);
+    N.binned_outcome_test=N.binned_outcome(trialselector);
+    
+    % Preparing the train and test feature matrices
+    
+    X=struct();
+    % train feature matrix
+    X.trialstart_train = zscore(temporalBases_sparse(N.binned_trialstart_train,bases.B(:,rcSelect)));
+    X.start_outcome_train = zscore(temporalBases_sparse(N.binned_outcome_train.*N.binned_trialstart_train, bases.B(:, rcSelect)));
+    X.pre_trialend_train=zscore(flipud(temporalBases_sparse(flipud(N.binned_trialend_train), bases.B(:, rcSelect))));
+    X.pre_end_outcome_train=zscore(flipud(temporalBases_sparse(flipud(N.binned_trialend_train.*N.binned_outcome_train), bases.B(:, rcSelect))));
+    X.trialend_train= zscore(temporalBases_sparse(N.binned_trialend_train,bases.B(:,rcSelect)));
+    X.end_outcome_train = zscore(temporalBases_sparse(N.binned_outcome_train.*N.binned_trialend_train, bases.B(:, rcSelect)));
+    
+    for neuron_id=1:length(RAW.Nrast)
+        y=N.binned_spikes_train(:, neuron_id);
+        
+        X.SpkHist_train{neuron_id}=zscore(temporalBases_sparse([0; y(1:end-1)], bases.B(:,rcSelect)));
+    end
+    
+    % test feature matrix
+
+    X.trialstart_test = zscore(temporalBases_sparse(N.binned_trialstart_test,bases.B(:,rcSelect)));
+    X.start_outcome_test = zscore(temporalBases_sparse(N.binned_outcome_test.*N.binned_trialstart_test, bases.B(:, rcSelect)));
+    X.pre_trialend_test=zscore(flipud(temporalBases_sparse(flipud(N.binned_trialend_test), bases.B(:, rcSelect))));
+    X.pre_end_outcome_test=zscore(flipud(temporalBases_sparse(flipud(N.binned_trialend_test.*N.binned_outcome_test), bases.B(:, rcSelect))));
+    X.trialend_test= zscore(temporalBases_sparse(N.binned_trialend_test,bases.B(:,rcSelect)));
+    X.end_outcome_test = zscore(temporalBases_sparse(N.binned_outcome_test.*N.binned_trialend_test, bases.B(:, rcSelect)));
+    
+    for neuron_id=1:length(RAW.Nrast)
+        y=N.binned_spikes_test(:, neuron_id);
+        
+        X.SpkHist_test{neuron_id}=zscore(temporalBases_sparse([0; y(1:end-1)], bases.B(:,rcSelect)));
+    end
+    
+
+    % Shared state glm
+    logp_null=0;
+    X_all_neuron_train = cell(1,numNeurons);
+    X_all_neuron_test = cell(1,numNeurons);
+    y_neuron_train = cell(1,numNeurons);
+    y_neuron_test = cell(1,numNeurons);
+
+    for neuron_id=1:length(RAW.Nrast)
+        
+        y_train = N.binned_spikes_train(:,neuron_id);
+        y_test = N.binned_spikes_test(:, neuron_id);
+       
+        if RAW.FR(neuron_id)<0.2 
+             disp(['Skipping low FR (<0.2Hz)# ' num2str(neuron_id)]);
+             continue;
+        end
+       
+        % === 1. Prepare the feature matrix by combining all predictors ===
+        X_all_train = [ ones(length(X.SpkHist_train{1,neuron_id}),1),  X.trialstart_train, X.start_outcome_train, X.pre_trialend_train, X.pre_end_outcome_train, X.trialend_train, X.end_outcome_train, X.SpkHist_train{1,neuron_id}];
+        X_all_test = [ ones(length(X.SpkHist_test{1,neuron_id}),1),  X.trialstart_test, X.start_outcome_test, X.pre_trialend_test, X.pre_end_outcome_test, X.trialend_test, X.end_outcome_test, X.SpkHist_test{1,neuron_id}];
+
+        X_all_neuron_train{neuron_id}=X_all_train';
+        X_all_neuron_test{neuron_id}=X_all_test';
+    
+        y_neuron_train{neuron_id}=y_train';
+        y_neuron_test{neuron_id}=y_test';
+        lambda0=mean(y_train);
+        lam=max(lambda0,1e-12);
+        logp_null=logp_null+sum(y_test.*log(lam)-lam);
+    end
+    X_all_neuron_train = X_all_neuron_train(~cellfun(@isempty,X_all_neuron_train));
+    y_neuron_train = y_neuron_train(~cellfun(@isempty,y_neuron_train));
+   
+    [Ahat, What, logp,logpTrace,sqErr,jj,dlogp,gams,~]=runEMforGLMHMM_multi(A0,W0_neuron,X_all_neuron_train,y_neuron_train, optimal_lambda);
+    
+    finalLogLikelihood=logpTrace(end);
+    logLs = finalLogLikelihood;
+    
+    % --- Compute # of params ---
+    nCov = size(X_all_train,2);
+    p = numStates*(numStates-1) + numStates*nCov;  % transition + GLM weights
+    
+    % --- Compute AIC/BIC ---
+    T = size(X_all_train,1);  % number of bins
+    AICs = -2*finalLogLikelihood + 2*p;
+    BICs = -2*finalLogLikelihood + p*log(T);
+    
+    %testing the held out trial
+    X_all_neuron_test = X_all_neuron_test(~cellfun(@isempty,X_all_neuron_test));
+    y_neuron_test = y_neuron_test(~cellfun(@isempty,y_neuron_test));
+    Nspikes = sum(cellfun(@sum, y_neuron_test)); %sums within each cell
+    T_test = length(y_neuron_test{1}) * bin_size;  % seconds
+    logp_test(heldOutTrial)=runF_test_GLMHMM_multi_stable(Ahat, What, X_all_neuron_test, y_neuron_test);
+    bits_per_spike=(logp_test(heldOutTrial)-logp_null)/(Nspikes*log(2));
+    bits_per_sec=(logp_test(heldOutTrial)-logp_null)/(T_test*log(2));
+
+    results_hota(heldOutTrial).K = numStates;
+    results_hota(heldOutTrial).A0=A0;
+    results_hota(heldOutTrial).W0=W0_neuron;
+    results_hota(heldOutTrial).optimal_lambda=optimal_lambda;
+    results_hota(heldOutTrial).Ahat = Ahat;
+    results_hota(heldOutTrial).What = What;
+    results_hota(heldOutTrial).gams = gams;
+    results_hota(heldOutTrial).logpTrace = logpTrace;
+    results_hota(heldOutTrial).finalLogL = logpTrace(end);
+    results_hota(heldOutTrial).AIC = AICs;
+    results_hota(heldOutTrial).BIC = BICs;
+    results_hota(heldOutTrial).sqErr = sqErr;
+    results_hota(heldOutTrial).nParams = p;
+    results_hota(heldOutTrial).neuronIDs = find(RAW.FR >= 0.2);
+    results_hota(heldOutTrial).bits_per_spike=bits_per_spike;
+    results_hota(heldOutTrial).bits_per_sec=bits_per_sec;
+
+    
+end
+
+%% Held out trial analysis plots
+close all;
+colors=parulaHighContrast(numStates+1);
+results_hota=load('results_4states_hota.mat');
+results_hota=results_hota.results_hota;
+results_hota_shuff=load('results_4states_hota_shuff.mat');
+results_hota_shuff=results_hota_shuff.results_hota;
+for i=1:length(results_hota)
+
+    bits_per_sec_real(i)=results_hota(i).bits_per_sec;
+    bits_per_sec_shuff(i)=results_hota_shuff(i).bits_per_sec;
+end
+
+% Combine for boxplot
+bits_per_sec_data   = [bits_per_sec_real, bits_per_sec_shuff];
+groups = [repmat({'Real'}, length(bits_per_sec_real), 1); ...
+          repmat({'Shuffled'}, length(bits_per_sec_shuff), 1)];
+
+fig=figure;
+x1 = 1 + 0.1*randn(size(bits_per_sec_real)); 
+x2 = 2 + 0.1*randn(size(bits_per_sec_shuff)); 
+hold on
+scatter(x1, bits_per_sec_real, 20, colors(1,:), ...
+    'filled', 'jitter','on','jitterAmount',0.05);
+scatter(x2, bits_per_sec_shuff, 20, colors(2,:), ...
+    'filled', 'jitter','on','jitterAmount',0.05);
+ylabel(sprintf('Held-out log-likelihood \n (Bits per second)'));
+errorbar(1, mean(bits_per_sec_real), std(bits_per_sec_real),...
+        'Color',[0.4,0.4,0.4],'LineWidth',1,'CapSize',5);
+plot(1, mean(bits_per_sec_real),'ko','MarkerFaceColor',[0,0,0],'MarkerSize',4,'MarkerEdgeColor','none');
+errorbar(2, mean(bits_per_sec_shuff), std(bits_per_sec_shuff),...
+        'Color',[0.4,0.4,0.4],'LineWidth',1,'CapSize',5);
+plot(2, mean(bits_per_sec_shuff),'ko','MarkerFaceColor',[0,0,0],'MarkerSize',4,'MarkerEdgeColor','none');
+% Sign-rank test (paired)
+[p, h, stats] = signrank(bits_per_sec_real,bits_per_sec_shuff);
+xticks([1,2])
+xticklabels({'Real','Shuffled'});
+% Display p-value on plot
+yl = ylim;
+text(1.5, yl(2)*0.95, sprintf('p = %.3g', p), ...
+    'HorizontalAlignment', 'center', 'FontSize', 12);
+hold off
