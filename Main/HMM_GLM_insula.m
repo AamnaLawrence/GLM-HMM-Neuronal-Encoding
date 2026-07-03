@@ -7,6 +7,7 @@ clear all;
 RAW = load('insula.mat');
 RAW = RAW.RAW;
 event.times{1,2}=sort([RAW.Erast{1,1},RAW.Erast{7,1}]); %concatenating all lever insertions
+
 %% Binning neuronal data
 N=[];
 bin_size=0.05;
@@ -536,6 +537,10 @@ time_axis_sec = (win(1):win(2)) * bin_size;
 window_len = diff(win) + 1;
 state_seq = nan(numTrials, window_len);
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> d75c13e (added missing events information)
 latencies_rwd = RAW.Erast{6,1}(RAW.Erast{6,1}~=0);
     
 for tr = 1:numTrials
