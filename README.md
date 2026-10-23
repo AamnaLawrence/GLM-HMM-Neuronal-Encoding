@@ -49,6 +49,10 @@ This dataset was collected in our laboratory (Dr. Patricia Janak) and is provide
 │
 ├── Misc/synthetic_data_recovery
 │
+├── Notebook/
+│   ├── Figures/
+│   └── mPFC_analysis.ipynb/
+│
 ├── README.md
 ├── LICENSE
 
