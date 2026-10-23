@@ -82,7 +82,7 @@ if bin_size==0.05
 elseif bin_size==0.02
     bases = makeNonlinearRaisedCos(20, bin_size*1000, [0 1000], 20); %for 20ms with 2.7s time support
 end
-figure;
+fig=figure;
 plot(bases.tr * (bin_size), bases.B(:,rcSelect)); % convert bins back to seconds
 xlabel('Time (s)');
 ylabel('Basis amplitude');
