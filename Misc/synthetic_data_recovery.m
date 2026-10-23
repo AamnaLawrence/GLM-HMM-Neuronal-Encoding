@@ -188,15 +188,12 @@ plot(2:numel(results_fake.logpTrace), -logpTrace, 'o-','LineWidth',2);
 xlabel('Iteration');
 ylabel('Negative log-likelihood');
 box off
-manuscriptify(fig,3,4)
-
 fig=figure;
 sqErr=results_fake.sqErr(2:end);
 plot(2:numel(results_fake.sqErr), sqErr, 'o-','LineWidth',2);
 xlabel('Iteration');
 ylabel('Squared parameter change');
 box off
-manuscriptify(fig,3,4)
 
 %% State correlation
 K = nStates; %
@@ -276,10 +273,7 @@ fprintf('A Frobenius error = %.4f\n', A_Frobenius);
 
 %% GLM weight recovery
 
-weight_score = zeros(size(permsK,1),1);
 W_rec=results_fake.What;
-
-
 perm = bestPerm;
 score = 0;
 
