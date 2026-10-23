@@ -47,6 +47,7 @@ This dataset was collected in our laboratory (Dr. Patricia Janak) and is provide
 │
 ├── GLM-HMM supporting functions/
 │
+├── Misc/synthetic_data_recovery
 ├── README.md
 ├── LICENSE
 
