@@ -1,6 +1,6 @@
 # Stable Parameter Estimation for GLM-HMMs Applied to Neural Population Activity
 
-This repository contains the code and processed data required to reproduce the analyses and figures presented in the manuscript (under revision by PLOS Computation Biology)
+This repository contains the code and processed data required to reproduce the analyses and figures presented in the manuscript (under revision by PLOS Computational Biology)
 > Aamna Lawrence, Eva Yezerets, Patrica H. Janak, Adam S. Charles (2026); Uncovering internal states with a robust shared-state multi-neuron GLM-HMM framework.
 bioRxiv. https://doi.org/10.64898/2026.06.27.734988
 
