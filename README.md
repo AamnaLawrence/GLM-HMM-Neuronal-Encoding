@@ -51,7 +51,7 @@ This dataset was collected in our laboratory (Dr. Patricia Janak) and is provide
 │
 ├── Notebook/
 │   ├── Figures/
-│   └── mPFC_analysis.ipynb/
+│   └── mPFC_analysis.ipynb
 │
 ├── README.md
 ├── LICENSE
