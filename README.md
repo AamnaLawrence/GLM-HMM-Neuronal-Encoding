@@ -4,8 +4,6 @@ This repository contains the code and processed data required to reproduce the a
 > Aamna Lawrence, Eva Yezerets, Patrica H. Janak, Adam S. Charles (2026); Uncovering internal states with a robust shared-state multi-neuron GLM-HMM framework.
 bioRxiv. https://doi.org/10.64898/2026.06.27.734988
 
-> **Uncovering internal states with a robust shared-state multi-neuron GLM-HMM framework**
-
 > Archived version of this repository: [![DOI](https://zenodo.org/badge/1282323989.svg)](https://doi.org/10.5281/zenodo.20970582)
 ---
 
